@@ -106,7 +106,13 @@ def fetch_top_markets(limit: int):
 
 def build_subscription_payload(mode: str, markets: list[dict]):
     market_ids = [m["market_id"] for m in markets if m.get("market_id")]
-    asset_ids = [m["asset_id"] for m in markets if m.get("asset_id")]
+    asset_ids = []
+    for m in markets:
+        for key in ("yes_asset_id", "no_asset_id", "asset_id"):
+            asset_id = m.get(key)
+            if asset_id:
+                asset_ids.append(asset_id)
+    asset_ids = list(dict.fromkeys(asset_ids))
     if mode == "event":
         return {"type": "subscribe", "channels": ["market"], "market_ids": market_ids}
     return {"type": "subscribe", "channel": "market", "assets_ids": asset_ids}
@@ -137,12 +143,13 @@ def extract_probability_updates(message: dict, price_source: str):
     return updates
 
 
-def summarize_event(message: dict, label_map: dict):
+def summarize_event(message: dict, label_map: dict, outcome_map: dict):
     event_type = message.get("event_type") or message.get("type")
     if not event_type:
         return None
     market_id = message.get("market") or message.get("market_id") or message.get("marketId")
     asset_id = message.get("asset_id") or message.get("assetId")
+    outcome = outcome_map.get(asset_id, "n/a")
     label_key = market_id or asset_id
     label = label_map.get(label_key, label_key) if label_key else None
     details = {}
@@ -176,6 +183,7 @@ def summarize_event(message: dict, label_map: dict):
         "time": timestamp_ms_to_iso(message.get("timestamp")),
         "event": event_type,
         "market": label or "n/a",
+        "outcome": outcome,
         "best_bid": details_clean.get("best_bid"),
         "best_ask": details_clean.get("best_ask"),
         "side": details_clean.get("side"),
@@ -284,7 +292,9 @@ class MarketMonitor:
                     continue
                 with self.state.lock:
                     cfg = dict(self.state.config)
-                event_entry = summarize_event(item, cfg.get("label_map", {}))
+                event_entry = summarize_event(
+                    item, cfg.get("label_map", {}), cfg.get("outcome_map", {})
+                )
                 if event_entry:
                     with self.state.lock:
                         self.state.events.appendleft(event_entry)
@@ -415,6 +425,10 @@ with st.sidebar:
     price_source = st.selectbox("Price source", ["best_bid", "best_ask"])
     auto_refresh = st.checkbox("Auto refresh UI", value=True)
     refresh_interval = st.slider("UI refresh (seconds)", 1, 10, 2)
+    event_filter = st.selectbox(
+        "Event filter",
+        ["All", "last_trade_price", "price_change", "book", "best_bid_ask"],
+    )
 
     st.subheader("Email alerts")
     smtp_cfg = get_smtp_config()
@@ -455,6 +469,15 @@ for m in markets:
     if m.get("no_asset_id"):
         label_map[m["no_asset_id"]] = m["question"]
 
+outcome_map = {}
+for m in markets:
+    yes_id = m.get("yes_asset_id")
+    no_id = m.get("no_asset_id")
+    if yes_id:
+        outcome_map[yes_id] = "Yes"
+    if no_id:
+        outcome_map[no_id] = "No"
+
 subscription_payload = None
 if subscription_override.strip():
     try:
@@ -479,9 +502,11 @@ with state.lock:
             "window_seconds": window_minutes * 60,
             "cooldown_seconds": cooldown_minutes * 60,
             "label_map": label_map,
+            "outcome_map": outcome_map,
             "smtp_config": smtp_cfg,
             "email_enabled": email_enabled,
             "price_source": price_source,
+            "event_filter": event_filter,
         }
     )
 
@@ -538,6 +563,9 @@ with alert_col:
 st.subheader("Live Event Stream")
 with state.lock:
     events = list(state.events)
+    active_filter = state.config.get("event_filter", "All")
+if active_filter != "All":
+    events = [event for event in events if event.get("event") == active_filter]
 if not events:
     st.write("No events yet.")
 else:
