@@ -44,6 +44,57 @@ def timestamp_ms_to_iso(value):
         return now_utc_iso()
 
 
+def normalize_market_record(market: dict, volume_override: float | None = None):
+    question = market.get("question") or market.get("title") or "Unknown market"
+    condition_id = market.get("conditionId") or market.get("condition_id")
+    market_id = market.get("id") or market.get("marketId")
+    clob_token_ids = market.get("clobTokenIds") or []
+    if isinstance(clob_token_ids, str):
+        try:
+            clob_token_ids = json.loads(clob_token_ids)
+        except json.JSONDecodeError:
+            clob_token_ids = []
+    outcomes = market.get("outcomes") or []
+    if isinstance(outcomes, str):
+        try:
+            outcomes = json.loads(outcomes)
+        except json.JSONDecodeError:
+            outcomes = []
+    if not isinstance(outcomes, list):
+        outcomes = []
+
+    asset_ids = []
+    if isinstance(clob_token_ids, list):
+        asset_ids = [str(token) for token in clob_token_ids]
+
+    yes_asset_id = None
+    no_asset_id = None
+    if outcomes and asset_ids and len(outcomes) == len(asset_ids):
+        for outcome, asset in zip(outcomes, asset_ids):
+            if str(outcome).lower() == "yes":
+                yes_asset_id = asset
+            elif str(outcome).lower() == "no":
+                no_asset_id = asset
+    if yes_asset_id is None and asset_ids:
+        yes_asset_id = asset_ids[0]
+    if no_asset_id is None and len(asset_ids) > 1:
+        no_asset_id = asset_ids[1]
+    volume = (
+        volume_override
+        if volume_override is not None
+        else safe_float(market.get("volume24hr") or market.get("volume")) or 0.0
+    )
+    return {
+        "market_id": str(market_id) if market_id is not None else None,
+        "condition_id": str(condition_id) if condition_id is not None else None,
+        "asset_id": yes_asset_id,
+        "yes_asset_id": yes_asset_id,
+        "no_asset_id": no_asset_id,
+        "question": question,
+        "volume24hr": volume,
+    }
+
+
 @st.cache_data(ttl=120)
 def fetch_top_markets(limit: int):
     url = (
@@ -55,53 +106,44 @@ def fetch_top_markets(limit: int):
     data = resp.json()
     markets = []
     for market in data:
-        question = market.get("question") or market.get("title") or "Unknown market"
-        condition_id = market.get("conditionId") or market.get("condition_id")
-        market_id = market.get("id") or market.get("marketId")
-        clob_token_ids = market.get("clobTokenIds") or []
-        if isinstance(clob_token_ids, str):
-            try:
-                clob_token_ids = json.loads(clob_token_ids)
-            except json.JSONDecodeError:
-                clob_token_ids = []
-        outcomes = market.get("outcomes") or []
-        if isinstance(outcomes, str):
-            try:
-                outcomes = json.loads(outcomes)
-            except json.JSONDecodeError:
-                outcomes = []
-        if not isinstance(outcomes, list):
-            outcomes = []
-
-        asset_ids = []
-        if isinstance(clob_token_ids, list):
-            asset_ids = [str(token) for token in clob_token_ids]
-
-        yes_asset_id = None
-        no_asset_id = None
-        if outcomes and asset_ids and len(outcomes) == len(asset_ids):
-            for outcome, asset in zip(outcomes, asset_ids):
-                if str(outcome).lower() == "yes":
-                    yes_asset_id = asset
-                elif str(outcome).lower() == "no":
-                    no_asset_id = asset
-        if yes_asset_id is None and asset_ids:
-            yes_asset_id = asset_ids[0]
-        if no_asset_id is None and len(asset_ids) > 1:
-            no_asset_id = asset_ids[1]
-        volume = safe_float(market.get("volume24hr") or market.get("volume")) or 0.0
-        markets.append(
-            {
-                "market_id": str(market_id) if market_id is not None else None,
-                "condition_id": str(condition_id) if condition_id is not None else None,
-                "asset_id": yes_asset_id,
-                "yes_asset_id": yes_asset_id,
-                "no_asset_id": no_asset_id,
-                "question": question,
-                "volume24hr": volume,
-            }
-        )
+        markets.append(normalize_market_record(market))
     return markets
+
+
+@st.cache_data(ttl=300)
+def fetch_tags(limit: int = 100):
+    resp = requests.get(
+        "https://gamma-api.polymarket.com/tags", params={"limit": limit}, timeout=15
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict):
+        data = data.get("tags") or data.get("data") or []
+    tags = []
+    for tag in data:
+        tag_id = tag.get("id")
+        name = tag.get("label") or tag.get("name") or tag.get("title") or tag.get("slug")
+        if tag_id is not None and name:
+            tags.append({"id": str(tag_id), "name": name})
+    return tags
+
+
+@st.cache_data(ttl=120)
+def fetch_events_by_tag(tag_id: str, limit: int = 200):
+    resp = requests.get(
+        "https://gamma-api.polymarket.com/events",
+        params={"tag_id": tag_id, "active": "true", "limit": limit},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict):
+        data = data.get("events") or data.get("data") or []
+    event_markets = []
+    for event in data:
+        for market in event.get("markets", []) or []:
+            event_markets.append(normalize_market_record(market, volume_override=0.0))
+    return event_markets
 
 
 def build_subscription_payload(mode: str, markets: list[dict]):
@@ -429,6 +471,16 @@ with st.sidebar:
         "Event filter",
         ["All", "last_trade_price", "price_change", "book", "best_bid_ask"],
     )
+    tags_data = []
+    try:
+        tags_data = fetch_tags()
+    except Exception as exc:
+        st.warning(f"Tag fetch failed: {exc}")
+    tag_name_to_id = {tag["name"]: tag["id"] for tag in tags_data}
+    selected_tags = st.multiselect(
+        "Filter by tags",
+        options=sorted(tag_name_to_id.keys()),
+    )
 
     st.subheader("Email alerts")
     smtp_cfg = get_smtp_config()
@@ -449,12 +501,31 @@ with st.sidebar:
 
 if refresh_clicked:
     fetch_top_markets.clear()
+    fetch_tags.clear()
+    fetch_events_by_tag.clear()
 
 markets = []
 try:
     markets = fetch_top_markets(top_n)
 except Exception as exc:
     st.error(f"Market discovery failed: {exc}")
+
+if selected_tags:
+    tagged_markets = []
+    for tag_name in selected_tags:
+        tag_id = tag_name_to_id.get(tag_name)
+        if tag_id:
+            tagged_markets.extend(fetch_events_by_tag(tag_id))
+    # De-duplicate by market_id/condition_id
+    seen = set()
+    filtered = []
+    for market in tagged_markets:
+        key = market.get("market_id") or market.get("condition_id")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        filtered.append(market)
+    markets = filtered
 
 label_map = {}
 for m in markets:
