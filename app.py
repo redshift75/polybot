@@ -96,12 +96,18 @@ def normalize_market_record(market: dict, volume_override: float | None = None):
 
 
 @st.cache_data(ttl=120)
-def fetch_top_markets(limit: int):
-    url = (
-        "https://gamma-api.polymarket.com/markets"
-        f"?active=true&closed=false&limit={limit}&sort=volume24hr:desc"
+def fetch_top_markets(limit: int, min_volume: float):
+    resp = requests.get(
+        "https://gamma-api.polymarket.com/markets",
+        params={
+            "active": "true",
+            "closed": "false",
+            "limit": limit,
+            "sort": "volume24hr:desc",
+            "volume_num_min": min_volume,
+        },
+        timeout=15,
     )
-    resp = requests.get(url, timeout=15)
     resp.raise_for_status()
     data = resp.json()
     markets = []
@@ -192,8 +198,13 @@ def summarize_event(message: dict, label_map: dict, outcome_map: dict):
     market_id = message.get("market") or message.get("market_id") or message.get("marketId")
     asset_id = message.get("asset_id") or message.get("assetId")
     outcome = outcome_map.get(asset_id, "n/a")
-    label_key = market_id or asset_id
-    label = label_map.get(label_key, label_key) if label_key else None
+    label = None
+    if market_id:
+        label = label_map.get(market_id)
+    if label is None and asset_id:
+        label = label_map.get(asset_id)
+    if label is None:
+        label = market_id or asset_id
     details = {}
 
     if event_type == "price_change":
@@ -461,6 +472,12 @@ with st.sidebar:
         value=os.getenv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com"),
     )
     top_n = st.slider("Top markets", 5, 50, int(os.getenv("TOP_MARKETS", "15")))
+    min_volume = st.number_input(
+        "Min 24h volume ($)",
+        min_value=0.0,
+        value=float(os.getenv("MIN_VOLUME", "0")),
+        step=1000.0,
+    )
     threshold = st.slider("Alert threshold (probability)", 0.01, 0.5, 0.05, 0.01)
     window_minutes = st.slider("Window (minutes)", 1, 120, 10)
     cooldown_minutes = st.slider("Alert cooldown (minutes)", 1, 120, 5)
@@ -506,7 +523,7 @@ if refresh_clicked:
 
 markets = []
 try:
-    markets = fetch_top_markets(top_n)
+    markets = fetch_top_markets(top_n, min_volume)
 except Exception as exc:
     st.error(f"Market discovery failed: {exc}")
 
@@ -632,15 +649,18 @@ with alert_col:
             )
 
 st.subheader("Live Event Stream")
+event_placeholder = st.empty()
 with state.lock:
     events = list(state.events)
     active_filter = state.config.get("event_filter", "All")
 if active_filter != "All":
     events = [event for event in events if event.get("event") == active_filter]
 if not events:
-    st.write("No events yet.")
+    event_placeholder.write("No events yet.")
 else:
-    st.dataframe(pd.DataFrame(events), use_container_width=True, height=300)
+    event_placeholder.dataframe(
+        pd.DataFrame(events), use_container_width=True, height=300
+    )
 
 if auto_refresh:
     time.sleep(refresh_interval)
