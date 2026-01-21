@@ -33,16 +33,16 @@ def safe_float(value):
         return None
 
 
-def now_utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def now_local_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def timestamp_ms_to_iso(value):
     try:
         ts = float(value) / 1000.0
-        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError):
-        return now_utc_iso()
+        return now_local_str()
 
 
 def normalize_market_record(market: dict, volume_override: float | None = None):
@@ -359,7 +359,7 @@ class MarketMonitor:
                     continue
                 ts = time.time()
                 with self.state.lock:
-                    self.state.status["last_message_at"] = now_utc_iso()
+                    self.state.status["last_message_at"] = now_local_str()
                 for key, prob in updates:
                     self._process_update(key, prob, ts, cfg)
 
@@ -397,7 +397,7 @@ class MarketMonitor:
             if delta < threshold or (ts - last_alert) < cooldown_seconds:
                 return
             alert = {
-                "time": now_utc_iso(),
+                "time": now_local_str(),
                 "market": label,
                 "market_id": key,
                 "from": old_prob,
@@ -467,11 +467,10 @@ state: MonitorState = st.session_state.monitor_state
 
 with st.sidebar:
     st.header("Settings")
-    mode = st.selectbox("WebSocket mode", ["clob", "event"])
-    ws_url = st.text_input(
-        "WebSocket URL",
-        value=os.getenv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com"),
-    )
+    
+    mode = os.getenv("POLYMARKET_WS_MODE", "clob")
+    ws_url = os.getenv("POLYMARKET_WS_URL", "wss://ws-subscriptions-clob.polymarket.com")
+
     top_n = st.slider("Top markets", 5, 50, int(os.getenv("TOP_MARKETS", "15")))
     min_volume = st.number_input(
         "Min volume ($)",
@@ -610,7 +609,13 @@ if stop_clicked and st.session_state.monitor:
 status = state.status
 st.subheader("Connection")
 st.write("Connected:", bool(status.get("connected")))
-st.write("Last message:", status.get("last_message_at") or "n/a")
+last_message = status.get("last_message_at")
+if last_message:
+    try:
+        last_message = datetime.fromisoformat(last_message).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
+st.write("Last message:", last_message or "n/a")
 if status.get("last_error"):
     st.error(status["last_error"])
 
