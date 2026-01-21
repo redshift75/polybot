@@ -12,6 +12,7 @@ from email.message import EmailMessage
 import pandas as pd
 import requests
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import websocket
 from dotenv import load_dotenv
 
@@ -473,10 +474,10 @@ with st.sidebar:
     )
     top_n = st.slider("Top markets", 5, 50, int(os.getenv("TOP_MARKETS", "15")))
     min_volume = st.number_input(
-        "Min 24h volume ($)",
-        min_value=0.0,
-        value=float(os.getenv("MIN_VOLUME", "0")),
-        step=1000.0,
+        "Min volume ($)",
+        min_value=0,
+        value=int(os.getenv("MIN_VOLUME", "1000000")),
+        step=100000,
     )
     threshold = st.slider("Alert threshold (probability)", 0.01, 0.5, 0.05, 0.01)
     window_minutes = st.slider("Window (minutes)", 1, 120, 10)
@@ -649,19 +650,24 @@ with alert_col:
             )
 
 st.subheader("Live Event Stream")
-event_placeholder = st.empty()
 with state.lock:
     events = list(state.events)
     active_filter = state.config.get("event_filter", "All")
 if active_filter != "All":
     events = [event for event in events if event.get("event") == active_filter]
-if not events:
-    event_placeholder.write("No events yet.")
-else:
-    event_placeholder.dataframe(
-        pd.DataFrame(events), use_container_width=True, height=300
-    )
+event_columns = [
+    "time",
+    "event",
+    "market",
+    "outcome",
+    "best_bid",
+    "best_ask",
+    "side",
+    "price",
+    "size",
+]
+events_df = pd.DataFrame(events, columns=event_columns)
+st.dataframe(events_df, use_container_width=True, height=300, key="events_table")
 
 if auto_refresh:
-    time.sleep(refresh_interval)
-    st.rerun()
+    st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")

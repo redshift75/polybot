@@ -1,4 +1,5 @@
 streamlit
+streamlit-autorefresh
 websocket-client
 requests
 pandas
